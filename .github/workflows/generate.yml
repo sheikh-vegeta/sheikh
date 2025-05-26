@@ -1,53 +1,275 @@
-name: ♾️ Gemini Batch Prompt Runner (HITL Ready)
+name: 🚀 Advanced Gemini Batch Prompt Runner (HITL Ready)
 
 on:
   workflow_dispatch:
+    inputs:
+      model_version:
+        description: 'Gemini Model Version'
+        required: true
+        default: 'gemini-1.5-pro'
+        type: choice
+        options:
+          - 'gemini-1.5-pro'
+          - 'gemini-1.5-flash'
+          - 'gemini-1.0-pro'
+      batch_size:
+        description: 'Batch Processing Size'
+        required: false
+        default: '5'
+        type: string
+      temperature:
+        description: 'Temperature (0.0-2.0)'
+        required: false
+        default: '0.7'
+        type: string
+      max_tokens:
+        description: 'Max Output Tokens'
+        required: false
+        default: '8192'
+        type: string
+      prompt_filter:
+        description: 'Process only prompts matching pattern (regex)'
+        required: false
+        default: '.*'
+        type: string
+      skip_validation:
+        description: 'Skip output validation'
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - main
+      - develop
     paths:
-      - 'prompts/*.mdx'
       - 'python/sheikh.py'
+      - 'prompts/**/*.mdx'
+      - 'prompts/**/*.md'
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly runs on Monday 2 AM UTC
+
+env:
+  PYTHON_VERSION: '3.11'
+  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
 jobs:
-  generate:
-    name: 🧠 Gemini Prompt Loop
+  # Single consolidated job to reduce runner costs
+  gemini-batch-processor:
+    name: 🧠 Gemini Batch Processor (Cost-Optimized)
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: 📥 Checkout Repository
-        uses: actions/checkout@v3.6.0
-
-      - name: 🐍 Setup Python
-        uses: actions/setup-python@v4.9.1
-        with:
-          python-version: '3.11'
-
-      - name: 📦 Install Dependencies
+        uses: actions/checkout@v4
+      
+      - name: 📋 Set Configuration
+        id: config
         run: |
-          python -m pip install --upgrade pip
-          pip install google-generativeai python-dotenv
-
-      - name: 🌀 Process All Prompts
+          echo "model_version=${{ github.event.inputs.model_version || 'gemini-1.5-pro' }}" >> $GITHUB_OUTPUT
+          echo "batch_size=${{ github.event.inputs.batch_size || '5' }}" >> $GITHUB_OUTPUT
+          echo "temperature=${{ github.event.inputs.temperature || '0.7' }}" >> $GITHUB_OUTPUT
+          echo "max_tokens=${{ github.event.inputs.max_tokens || '8192' }}" >> $GITHUB_OUTPUT
+          echo "prompt_filter=${{ github.event.inputs.prompt_filter || '.*' }}" >> $GITHUB_OUTPUT
+          echo "skip_validation=${{ github.event.inputs.skip_validation || 'false' }}" >> $GITHUB_OUTPUT
+      
+      - name: 🔒 Pre-flight Validation
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          mkdir -p output
-          for file in prompts/*.mdx; do
+          # Verify API Key
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "❌ GEMINI_API_KEY secret not found"
+            exit 1
+          fi
+          echo "✅ API Key configured"
+          
+          # Check Prompt Directory
+          if [ ! -d "prompts" ]; then
+            echo "❌ Prompts directory not found"
+            exit 1
+          fi
+          
+          prompt_count=$(find prompts -name "*.mdx" -o -name "*.md" | wc -l)
+          echo "📊 Found $prompt_count prompt files"
+          
+          if [ "$prompt_count" -eq 0 ]; then
+            echo "⚠️ No prompt files found"
+            exit 1
+          fi
+          
+          # Validate Python Script
+          if [ ! -f "python/sheikh.py" ]; then
+            echo "❌ sheikh.py not found"
+            exit 1
+          fi
+          
+          python -m py_compile python/sheikh.py || {
+            echo "❌ Python syntax validation failed"
+            exit 1
+          }
+          
+          echo "✅ All validations passed"
+
+      - name: 🐍 Setup Python Environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: 📦 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-generativeai python-dotenv tenacity rich
+          pip install -r requirements.txt 2>/dev/null || echo "No requirements.txt found"
+      
+      - name: 🌀 Process All Prompts
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL_VERSION: ${{ steps.config.outputs.model_version }}
+          TEMPERATURE: ${{ steps.config.outputs.temperature }}
+          MAX_TOKENS: ${{ steps.config.outputs.max_tokens }}
+          PROMPT_FILTER: ${{ steps.config.outputs.prompt_filter }}
+        run: |
+          # Create output directory with timestamp
+          timestamp=$(date +"%Y%m%d_%H%M%S")
+          output_dir="output_${timestamp}"
+          mkdir -p "$output_dir"
+          
+          success_count=0
+          error_count=0
+          
+          # Find and filter prompt files
+          find prompts -name "*.mdx" -o -name "*.md" | grep -E "$PROMPT_FILTER" | sort | while IFS= read -r file; do
+            if [ -z "$file" ]; then continue; fi
+            
             filename=$(basename -- "$file")
             name="${filename%.*}"
-            echo "🧾 Processing $filename..."
-            cat "$file" | python python/sheikh.py > "output/$name.txt"
+            output_file="$output_dir/${name}.txt"
+            
+            echo "🔄 Processing: $filename"
+            
+            # Process with timeout
+            if timeout 300s python python/sheikh.py \
+              --model "$MODEL_VERSION" \
+              --temperature "$TEMPERATURE" \
+              --max-tokens "$MAX_TOKENS" \
+              --input "$file" \
+              --output "$output_file" 2>&1; then
+              
+              echo "✅ Success: $filename"
+              success_count=$((success_count + 1))
+              
+              # Add metadata
+              echo "" >> "$output_file"
+              echo "---" >> "$output_file"
+              echo "Generated: $(date -Iseconds)" >> "$output_file"
+              echo "Model: $MODEL_VERSION" >> "$output_file"
+              echo "Temperature: $TEMPERATURE" >> "$output_file"
+              echo "Source: $file" >> "$output_file"
+            else
+              echo "❌ Failed: $filename"
+              error_count=$((error_count + 1))
+              
+              # Create error file
+              echo "Error processing $file at $(date -Iseconds)" > "$output_dir/${name}_ERROR.txt"
+              echo "Check logs for details" >> "$output_dir/${name}_ERROR.txt"
+            fi
+            
+            # Rate limiting (2 seconds between requests)
+            sleep 2
           done
-
-      - name: 👁️ Human-in-the-Loop Review (Pre-upload)
+          
+          echo "📊 Processing Complete: $success_count successes, $error_count errors"
+          echo "output_dir=$output_dir" >> $GITHUB_ENV
+      
+      - name: 📊 Generate Summary Report
         run: |
-          echo "🧠 Outputs generated. Review in ./output/"
-          ls -lah output/
-          head -n 20 output/*.txt || true  # show preview
-
-      - name: ☁️ Upload All Outputs
-        uses: actions/upload-artifact@v3.1.3
+          output_dir="${{ env.output_dir }}"
+          
+          # Generate comprehensive report
+          cat > "$output_dir/PROCESSING_REPORT.md" << EOF
+          # 🧠 Gemini Batch Processing Report
+          
+          **Generated:** $(date -Iseconds)
+          **Workflow Run:** ${{ github.run_number }}
+          **Model:** ${{ steps.config.outputs.model_version }}
+          **Temperature:** ${{ steps.config.outputs.temperature }}
+          **Max Tokens:** ${{ steps.config.outputs.max_tokens }}
+          
+          ## Statistics
+          EOF
+          
+          # Count outputs and errors
+          total_outputs=$(find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" | wc -l)
+          total_errors=$(find "$output_dir" -name "*_ERROR.txt" | wc -l)
+          
+          echo "- 📄 **Total Outputs:** $total_outputs" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "- ❌ **Total Errors:** $total_errors" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "" >> "$output_dir/PROCESSING_REPORT.md"
+          
+          # Quality check
+          empty_files=$(find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" -empty | wc -l)
+          short_files=$(find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" -exec sh -c 'test $(wc -c < "$1") -lt 50' _ {} \; -print | wc -l)
+          
+          echo "## Quality Check" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "- ⚠️ Empty files: $empty_files" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "- ⚠️ Short files (<50 chars): $short_files" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "" >> "$output_dir/PROCESSING_REPORT.md"
+          
+          # Sample outputs
+          echo "## Sample Outputs" >> "$output_dir/PROCESSING_REPORT.md"
+          find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" | head -3 | while read -r file; do
+            echo "### $(basename "$file")" >> "$output_dir/PROCESSING_REPORT.md"
+            echo '```' >> "$output_dir/PROCESSING_REPORT.md"
+            head -c 200 "$file" >> "$output_dir/PROCESSING_REPORT.md"
+            echo '...' >> "$output_dir/PROCESSING_REPORT.md"
+            echo '```' >> "$output_dir/PROCESSING_REPORT.md"
+            echo "" >> "$output_dir/PROCESSING_REPORT.md"
+          done
+          
+          # List all files
+          echo "## Generated Files" >> "$output_dir/PROCESSING_REPORT.md"
+          ls -lah "$output_dir" >> "$output_dir/PROCESSING_REPORT.md"
+      
+      - name: 👁️ Human Review Preview
+        run: |
+          output_dir="${{ env.output_dir }}"
+          echo "🧾 Processing complete! Generated files:"
+          ls -lah "$output_dir/"
+          
+          echo ""
+          echo "📋 Quick preview of outputs:"
+          find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" | head -3 | while read -r file; do
+            echo "📄 $(basename "$file"):"
+            head -n 5 "$file" | sed 's/^/  /'
+            echo "  ..."
+            echo ""
+          done
+      
+      - name: 📤 Upload All Results
+        uses: actions/upload-artifact@v4
         with:
-          name: gemini-all-outputs
-          path: output/
+          name: gemini-batch-outputs-${{ github.run_number }}
+          path: ${{ env.output_dir }}
+          retention-days: 30
+      
+      - name: 📢 Optional Slack Notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{
+              \"text\": \"🧠 Gemini Batch Processing Complete - ${{ github.run_number }}\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*Batch Processing Results*\n• Model: ${{ steps.config.outputs.model_version }}\n• <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>\"
+                  }
+                }
+              ]
+            }" \
+            $SLACK_WEBHOOK_URL || echo "Slack notification failed (optional)"
