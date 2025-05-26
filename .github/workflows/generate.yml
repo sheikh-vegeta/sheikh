@@ -51,19 +51,18 @@ on:
 env:
   PYTHON_VERSION: '3.11'
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
 jobs:
-  validate-inputs:
-    name: 🔍 Validate Configuration
+  # Single consolidated job to reduce runner costs
+  gemini-batch-processor:
+    name: 🧠 Gemini Batch Processor (Cost-Optimized)
     runs-on: ubuntu-latest
-    outputs:
-      model_version: ${{ steps.config.outputs.model_version }}
-      batch_size: ${{ steps.config.outputs.batch_size }}
-      temperature: ${{ steps.config.outputs.temperature }}
-      max_tokens: ${{ steps.config.outputs.max_tokens }}
-      prompt_filter: ${{ steps.config.outputs.prompt_filter }}
-      skip_validation: ${{ steps.config.outputs.skip_validation }}
+    
     steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+      
       - name: 📋 Set Configuration
         id: config
         run: |
@@ -73,27 +72,19 @@ jobs:
           echo "max_tokens=${{ github.event.inputs.max_tokens || '8192' }}" >> $GITHUB_OUTPUT
           echo "prompt_filter=${{ github.event.inputs.prompt_filter || '.*' }}" >> $GITHUB_OUTPUT
           echo "skip_validation=${{ github.event.inputs.skip_validation || 'false' }}" >> $GITHUB_OUTPUT
-
-  pre-flight-check:
-    name: 🛡️ Pre-flight Security & Health Check
-    runs-on: ubuntu-latest
-    needs: validate-inputs
-    steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
       
-      - name: 🔒 Verify API Key
+      - name: 🔒 Pre-flight Validation
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          # Verify API Key
           if [ -z "$GEMINI_API_KEY" ]; then
             echo "❌ GEMINI_API_KEY secret not found"
             exit 1
           fi
           echo "✅ API Key configured"
-      
-      - name: 📂 Check Prompt Directory
-        run: |
+          
+          # Check Prompt Directory
           if [ ! -d "prompts" ]; then
             echo "❌ Prompts directory not found"
             exit 1
@@ -107,37 +98,19 @@ jobs:
             exit 1
           fi
           
-          echo "prompt_count=$prompt_count" >> $GITHUB_ENV
-      
-      - name: 🧪 Validate Python Script
-        run: |
+          # Validate Python Script
           if [ ! -f "python/sheikh.py" ]; then
             echo "❌ sheikh.py not found"
             exit 1
           fi
           
-          # Check for basic Python syntax
           python -m py_compile python/sheikh.py || {
             echo "❌ Python syntax validation failed"
             exit 1
           }
           
-          echo "✅ Python script validated"
+          echo "✅ All validations passed"
 
-  generate-prompts:
-    name: 🧠 Generate Responses (${{ needs.validate-inputs.outputs.model_version }})
-    runs-on: ubuntu-latest
-    needs: [validate-inputs, pre-flight-check]
-    strategy:
-      matrix:
-        batch: [1, 2, 3, 4, 5]
-      fail-fast: false
-      max-parallel: 2
-    
-    steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v4
-      
       - name: 🐍 Setup Python Environment
         uses: actions/setup-python@v4
         with:
@@ -147,62 +120,36 @@ jobs:
       - name: 📦 Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install google-generativeai python-dotenv tenacity rich click
+          pip install google-generativeai python-dotenv tenacity rich
           pip install -r requirements.txt 2>/dev/null || echo "No requirements.txt found"
       
-      - name: 📋 Prepare Batch Processing
-        id: batch-prep
+      - name: 🌀 Process All Prompts
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL_VERSION: ${{ steps.config.outputs.model_version }}
+          TEMPERATURE: ${{ steps.config.outputs.temperature }}
+          MAX_TOKENS: ${{ steps.config.outputs.max_tokens }}
+          PROMPT_FILTER: ${{ steps.config.outputs.prompt_filter }}
         run: |
           # Create output directory with timestamp
           timestamp=$(date +"%Y%m%d_%H%M%S")
-          output_dir="output/batch_${{ matrix.batch }}_${timestamp}"
+          output_dir="output_${timestamp}"
           mkdir -p "$output_dir"
-          echo "output_dir=$output_dir" >> $GITHUB_OUTPUT
           
-          # Get prompt files for this batch
-          batch_size=${{ needs.validate-inputs.outputs.batch_size }}
-          filter_pattern="${{ needs.validate-inputs.outputs.prompt_filter }}"
-          
-          # Find and filter prompt files
-          all_prompts=$(find prompts -name "*.mdx" -o -name "*.md" | grep -E "$filter_pattern" | sort)
-          total_prompts=$(echo "$all_prompts" | wc -l)
-          
-          # Calculate batch range
-          start_idx=$(( (${{ matrix.batch }} - 1) * batch_size + 1 ))
-          end_idx=$(( ${{ matrix.batch }} * batch_size ))
-          
-          if [ $start_idx -gt $total_prompts ]; then
-            echo "skip_batch=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          batch_prompts=$(echo "$all_prompts" | sed -n "${start_idx},${end_idx}p")
-          echo "$batch_prompts" > batch_files.txt
-          
-          echo "✅ Batch ${{ matrix.batch }}: Processing $(echo "$batch_prompts" | wc -l) files"
-          echo "skip_batch=false" >> $GITHUB_OUTPUT
-      
-      - name: 🌀 Process Batch Prompts
-        if: steps.batch-prep.outputs.skip_batch == 'false'
-        env:
-          MODEL_VERSION: ${{ needs.validate-inputs.outputs.model_version }}
-          TEMPERATURE: ${{ needs.validate-inputs.outputs.temperature }}
-          MAX_TOKENS: ${{ needs.validate-inputs.outputs.max_tokens }}
-          OUTPUT_DIR: ${{ steps.batch-prep.outputs.output_dir }}
-        run: |
           success_count=0
           error_count=0
           
-          while IFS= read -r file; do
+          # Find and filter prompt files
+          find prompts -name "*.mdx" -o -name "*.md" | grep -E "$PROMPT_FILTER" | sort | while IFS= read -r file; do
             if [ -z "$file" ]; then continue; fi
             
             filename=$(basename -- "$file")
             name="${filename%.*}"
-            output_file="$OUTPUT_DIR/${name}.txt"
+            output_file="$output_dir/${name}.txt"
             
             echo "🔄 Processing: $filename"
             
-            # Process with timeout and retry logic
+            # Process with timeout
             if timeout 300s python python/sheikh.py \
               --model "$MODEL_VERSION" \
               --temperature "$TEMPERATURE" \
@@ -225,179 +172,104 @@ jobs:
               error_count=$((error_count + 1))
               
               # Create error file
-              echo "Error processing $file at $(date -Iseconds)" > "$OUTPUT_DIR/${name}_ERROR.txt"
-              echo "Check logs for details" >> "$OUTPUT_DIR/${name}_ERROR.txt"
+              echo "Error processing $file at $(date -Iseconds)" > "$output_dir/${name}_ERROR.txt"
+              echo "Check logs for details" >> "$output_dir/${name}_ERROR.txt"
             fi
             
-            # Rate limiting
+            # Rate limiting (2 seconds between requests)
             sleep 2
-          done < batch_files.txt
+          done
           
-          echo "📊 Batch ${{ matrix.batch }} Complete: $success_count successes, $error_count errors"
-          echo "batch_success_count=$success_count" >> $GITHUB_ENV
-          echo "batch_error_count=$error_count" >> $GITHUB_ENV
+          echo "📊 Processing Complete: $success_count successes, $error_count errors"
+          echo "output_dir=$output_dir" >> $GITHUB_ENV
       
-      - name: 🧹 Post-process Outputs
-        if: steps.batch-prep.outputs.skip_batch == 'false'
+      - name: 📊 Generate Summary Report
         run: |
-          output_dir="${{ steps.batch-prep.outputs.output_dir }}"
+          output_dir="${{ env.output_dir }}"
           
-          # Generate batch summary
-          cat > "$output_dir/BATCH_SUMMARY.md" << EOF
-          # Batch ${{ matrix.batch }} Summary
-          
-          **Generated:** $(date -Iseconds)
-          **Model:** ${{ needs.validate-inputs.outputs.model_version }}
-          **Temperature:** ${{ needs.validate-inputs.outputs.temperature }}
-          **Max Tokens:** ${{ needs.validate-inputs.outputs.max_tokens }}
-          
-          ## Statistics
-          - ✅ Successful: ${{ env.batch_success_count }}
-          - ❌ Errors: ${{ env.batch_error_count }}
-          
-          ## Files Generated
-          EOF
-          
-          find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" | sort >> "$output_dir/BATCH_SUMMARY.md"
-          
-          # Create file index
-          ls -lah "$output_dir"
-      
-      - name: 📤 Upload Batch Artifacts
-        if: steps.batch-prep.outputs.skip_batch == 'false'
-        uses: actions/upload-artifact@v4
-        with:
-          name: gemini-batch-${{ matrix.batch }}-outputs
-          path: ${{ steps.batch-prep.outputs.output_dir }}
-          retention-days: 30
-
-  human-review:
-    name: 👁️ Human-in-the-Loop Review
-    runs-on: ubuntu-latest
-    needs: [validate-inputs, generate-prompts]
-    if: always() && needs.generate-prompts.result != 'cancelled'
-    
-    steps:
-      - name: 📥 Download All Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: gemini-batch-*-outputs
-          path: ./all-outputs
-          merge-multiple: true
-      
-      - name: 📊 Generate Consolidated Report
-        run: |
-          mkdir -p review
-          
-          # Create comprehensive review report
-          cat > review/REVIEW_REPORT.md << EOF
-          # 🧠 Gemini Batch Processing Review Report
+          # Generate comprehensive report
+          cat > "$output_dir/PROCESSING_REPORT.md" << EOF
+          # 🧠 Gemini Batch Processing Report
           
           **Generated:** $(date -Iseconds)
           **Workflow Run:** ${{ github.run_number }}
-          **Triggered by:** ${{ github.event_name }}
-          **Model Used:** ${{ needs.validate-inputs.outputs.model_version }}
+          **Model:** ${{ steps.config.outputs.model_version }}
+          **Temperature:** ${{ steps.config.outputs.temperature }}
+          **Max Tokens:** ${{ steps.config.outputs.max_tokens }}
           
-          ## Configuration
-          - **Temperature:** ${{ needs.validate-inputs.outputs.temperature }}
-          - **Max Tokens:** ${{ needs.validate-inputs.outputs.max_tokens }}
-          - **Batch Size:** ${{ needs.validate-inputs.outputs.batch_size }}
-          - **Prompt Filter:** \`${{ needs.validate-inputs.outputs.prompt_filter }}\`
-          
-          ## Processing Summary
+          ## Statistics
           EOF
           
           # Count outputs and errors
-          total_outputs=$(find all-outputs -name "*.txt" -not -name "*_ERROR.txt" | wc -l)
-          total_errors=$(find all-outputs -name "*_ERROR.txt" | wc -l)
+          total_outputs=$(find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" | wc -l)
+          total_errors=$(find "$output_dir" -name "*_ERROR.txt" | wc -l)
           
-          echo "- 📄 **Total Outputs Generated:** $total_outputs" >> review/REVIEW_REPORT.md
-          echo "- ❌ **Total Errors:** $total_errors" >> review/REVIEW_REPORT.md
-          echo "" >> review/REVIEW_REPORT.md
+          echo "- 📄 **Total Outputs:** $total_outputs" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "- ❌ **Total Errors:** $total_errors" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "" >> "$output_dir/PROCESSING_REPORT.md"
           
-          # Sample outputs for review
-          echo "## 📋 Sample Outputs (First 100 chars)" >> review/REVIEW_REPORT.md
-          echo "" >> review/REVIEW_REPORT.md
+          # Quality check
+          empty_files=$(find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" -empty | wc -l)
+          short_files=$(find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" -exec sh -c 'test $(wc -c < "$1") -lt 50' _ {} \; -print | wc -l)
           
-          find all-outputs -name "*.txt" -not -name "*_ERROR.txt" | head -5 | while read -r file; do
-            echo "### $(basename "$file")" >> review/REVIEW_REPORT.md
-            echo '```' >> review/REVIEW_REPORT.md
-            head -c 100 "$file" >> review/REVIEW_REPORT.md
-            echo '...' >> review/REVIEW_REPORT.md
-            echo '```' >> review/REVIEW_REPORT.md
-            echo "" >> review/REVIEW_REPORT.md
+          echo "## Quality Check" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "- ⚠️ Empty files: $empty_files" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "- ⚠️ Short files (<50 chars): $short_files" >> "$output_dir/PROCESSING_REPORT.md"
+          echo "" >> "$output_dir/PROCESSING_REPORT.md"
+          
+          # Sample outputs
+          echo "## Sample Outputs" >> "$output_dir/PROCESSING_REPORT.md"
+          find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" | head -3 | while read -r file; do
+            echo "### $(basename "$file")" >> "$output_dir/PROCESSING_REPORT.md"
+            echo '```' >> "$output_dir/PROCESSING_REPORT.md"
+            head -c 200 "$file" >> "$output_dir/PROCESSING_REPORT.md"
+            echo '...' >> "$output_dir/PROCESSING_REPORT.md"
+            echo '```' >> "$output_dir/PROCESSING_REPORT.md"
+            echo "" >> "$output_dir/PROCESSING_REPORT.md"
           done
           
-          # Error summary
-          if [ $total_errors -gt 0 ]; then
-            echo "## ⚠️ Error Summary" >> review/REVIEW_REPORT.md
-            find all-outputs -name "*_ERROR.txt" | while read -r error_file; do
-              echo "- $(basename "$error_file")" >> review/REVIEW_REPORT.md
-            done
-          fi
-          
-          echo "📋 Review report generated"
+          # List all files
+          echo "## Generated Files" >> "$output_dir/PROCESSING_REPORT.md"
+          ls -lah "$output_dir" >> "$output_dir/PROCESSING_REPORT.md"
       
-      - name: 🔍 Quality Check
-        if: needs.validate-inputs.outputs.skip_validation == 'false'
+      - name: 👁️ Human Review Preview
         run: |
-          echo "🧪 Running quality checks..."
+          output_dir="${{ env.output_dir }}"
+          echo "🧾 Processing complete! Generated files:"
+          ls -lah "$output_dir/"
           
-          # Check for empty outputs
-          empty_files=$(find all-outputs -name "*.txt" -not -name "*_ERROR.txt" -empty | wc -l)
-          
-          # Check for suspiciously short outputs (< 50 chars)
-          short_files=$(find all-outputs -name "*.txt" -not -name "*_ERROR.txt" -exec sh -c 'test $(wc -c < "$1") -lt 50' _ {} \; -print | wc -l)
-          
-          echo "⚠️ Empty files: $empty_files"
-          echo "⚠️ Suspiciously short files: $short_files"
-          
-          if [ $empty_files -gt 0 ] || [ $short_files -gt 3 ]; then
-            echo "🚨 Quality check concerns detected"
-            echo "quality_concerns=true" >> $GITHUB_ENV
-          else
-            echo "✅ Quality check passed"
-            echo "quality_concerns=false" >> $GITHUB_ENV
-          fi
+          echo ""
+          echo "📋 Quick preview of outputs:"
+          find "$output_dir" -name "*.txt" -not -name "*_ERROR.txt" | head -3 | while read -r file; do
+            echo "📄 $(basename "$file"):"
+            head -n 5 "$file" | sed 's/^/  /'
+            echo "  ..."
+            echo ""
+          done
       
-      - name: 📤 Upload Review Package
+      - name: 📤 Upload All Results
         uses: actions/upload-artifact@v4
         with:
-          name: human-review-package
-          path: |
-            review/
-            all-outputs/
-          retention-days: 7
+          name: gemini-batch-outputs-${{ github.run_number }}
+          path: ${{ env.output_dir }}
+          retention-days: 30
       
-      - name: 📢 Slack Notification
+      - name: 📢 Optional Slack Notification
         if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          quality_status="${{ env.quality_concerns == 'true' && '🚨 Quality Concerns' || '✅ All Good' }}"
-          
           curl -X POST -H 'Content-type: application/json' \
             --data "{
-              \"text\": \"🧠 Gemini Batch Processing Complete\",
+              \"text\": \"🧠 Gemini Batch Processing Complete - ${{ github.run_number }}\",
               \"blocks\": [
                 {
                   \"type\": \"section\",
                   \"text\": {
                     \"type\": \"mrkdwn\",
-                    \"text\": \"*Gemini Batch Processing Results*\n• Model: ${{ needs.validate-inputs.outputs.model_version }}\n• Quality: $quality_status\n• <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>\"
+                    \"text\": \"*Batch Processing Results*\n• Model: ${{ steps.config.outputs.model_version }}\n• <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>\"
                   }
                 }
               ]
             }" \
-            $SLACK_WEBHOOK_URL
-
-  cleanup:
-    name: 🧹 Cleanup & Finalize
-    runs-on: ubuntu-latest
-    needs: [human-review]
-    if: always()
-    
-    steps:
-      - name: 📊 Final Statistics
-        run: |
-          echo "🎯 Workflow completed successfully"
-          echo "📅 Run ID: ${{ github.run_id }}"
-          echo "🔗 View results: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            $SLACK_WEBHOOK_URL || echo "Slack notification failed (optional)"
