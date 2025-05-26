@@ -1,109 +1,29 @@
-name: 💰 Simple Gemini Batch Processor (Free Tier)
+name: Run Gemini Script
 
 on:
-  workflow_dispatch:
-    inputs:
-      model:
-        description: 'Gemini Model'
-        required: false
-        default: 'gemini-1.5-flash'
-        type: choice
-        options:
-          - 'gemini-1.5-flash'  # Cheaper option
-          - 'gemini-1.5-pro'
-      max_files:
-        description: 'Max files to process (cost control)'
-        required: false
-        default: '10'
-        type: string
   push:
     branches:
       - main
-    paths:
-      - 'python/sheikh.py'
-      - 'prompts/*.mdx'
 
 jobs:
-  simple-batch:
-    name: 🚀 Simple Batch Process
+  run-gemini:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Prevent runaway costs
-    
+
     steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
-      
-      - name: 🐍 Setup Python
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
-      
-      - name: 📦 Install Minimal Dependencies
+          python-version: "3.11"
+
+      - name: Install Dependencies
         run: |
-          pip install --no-cache-dir google-generativeai python-dotenv
-      
-      - name: ✅ Quick Validation
+          pip install google-genai
+
+      - name: Run Gemini Script with Secret
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          [ -z "$GEMINI_API_KEY" ] && echo "❌ API key missing" && exit 1
-          [ ! -d "prompts" ] && echo "❌ No prompts dir" && exit 1
-          [ ! -f "python/sheikh.py" ] && echo "❌ No sheikh.py" && exit 1
-          echo "✅ Ready to process"
-      
-      - name: 🔄 Process Prompts
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          MAX_FILES: ${{ github.event.inputs.max_files || '10' }}
-          MODEL: ${{ github.event.inputs.model || 'gemini-1.5-flash' }}
-        run: |
-          mkdir -p output
-          count=0
-          max_files=${MAX_FILES}
-          
-          echo "🎯 Processing up to $max_files files with $MODEL"
-          
-          for file in prompts/*.mdx prompts/*.md; do
-            # Skip if file doesn't exist (handles glob non-matches)
-            [ ! -f "$file" ] && continue
-            
-            # Respect max files limit
-            [ $count -ge $max_files ] && break
-            
-            filename=$(basename "$file")
-            name="${filename%.*}"
-            output_file="output/${name}.txt"
-            
-            echo "🔄 [$((count+1))/$max_files] Processing: $filename"
-            
-            # Simple processing with basic error handling
-            if python python/sheikh.py --model "$MODEL" --input "$file" --output "$output_file" 2>&1; then
-              echo "✅ Success: $filename ($(wc -c < "$output_file") chars)"
-            else
-              echo "❌ Failed: $filename"
-              echo "Error processing $filename" > "output/${name}_ERROR.txt"
-            fi
-            
-            count=$((count + 1))
-            # Rate limiting - be nice to the API
-            sleep 3
-          done
-          
-          echo "📊 Processed $count files"
-          ls -lah output/
-      
-      - name: 📋 Quick Summary
-        run: |
-          outputs=$(find output -name "*.txt" -not -name "*ERROR*" | wc -l)
-          errors=$(find output -name "*ERROR*" | wc -l)
-          
-          echo "## 📊 Processing Summary" > output/README.md
-          echo "- ✅ Successful outputs: $outputs" >> output/README.md
-          echo "- ❌ Errors: $errors" >> output/README.md
-          echo "- 📅 Generated: $(date)" >> output/README.md
-          echo "- 🤖 Model: ${{ github.event.inputs.model || 'gemini-1.5-flash' }}" >> output/README.md
-          
-          cat output/README.md
-      
-      -
+          python path/to/your_script.py
