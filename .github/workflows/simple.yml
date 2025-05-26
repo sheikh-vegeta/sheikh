@@ -26,4 +26,4 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          python path/to/your_script.py
+          python python/sheikh.py
