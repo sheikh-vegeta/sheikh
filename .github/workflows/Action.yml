@@ -1,33 +1,46 @@
-name: Generate Content with Gemini API
+name: Generate Gemini Content
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
+  pull_request:
+    paths:
+      - "prompts/**"
+      - "python/sheikh.py"
 
 jobs:
   generate:
+    name: Generate Content via Gemini
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: 📦 Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Set up Python
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.8'
+          python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install google-generativeai
+      - name: 🧰 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-generativeai python-dotenv
 
-      - name: Run Python script
+      - name: 💡 Run Script with Gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python python/sheikh.py > output.txt
+        run: |
+          echo "Running content generation..."
+          python python/sheikh.py > output/output.txt
 
-      - name: Upload output
+      - name: 🧪 Display Output
+        run: cat output/output.txt
+
+      - name: 📤 Upload Output Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: generated-content
-          path: output.txt
+          name: gemini-output-${{ github.sha }}
+          path: output/output.txt
