@@ -8,9 +8,11 @@ from google.genai import types
 
 
 def generate():
-    client = genai.Client(
-        api_key=os.environ.get("GEMINI_API_KEY"),
-    )
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("❌ Environment variable 'GEMINI_API_KEY' is missing.")
+
+    client = genai.Client(api_key=api_key)
 
     model = "gemini-2.5-pro-preview-05-06"
     contents = [
